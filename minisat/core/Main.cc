@@ -117,7 +117,7 @@ int main(int argc, char** argv)
                 S.printStats();
                 printf("\n"); }
             printf("UNSATISFIABLE\n");
-            exit(20);
+            return S.sendStartInteractorAndExit(20);
         }
         
         vec<Lit> dummy;
@@ -139,15 +139,17 @@ int main(int argc, char** argv)
                 fprintf(res, "INDET\n");
             fclose(res);
         }
+
+        return S.sendStartInteractorAndExit((ret == l_True ? 10 : ret == l_False ? 20 : 0));
         
-#ifdef NDEBUG
+/*#ifdef NDEBUG
         exit(ret == l_True ? 10 : ret == l_False ? 20 : 0);     // (faster than "return", which will invoke the destructor for 'Solver')
 #else
         return (ret == l_True ? 10 : ret == l_False ? 20 : 0);
-#endif
+#endif*/
     } catch (OutOfMemoryException&){
         printf("===============================================================================\n");
         printf("INDETERMINATE\n");
-        exit(0);
+        return 0;
     }
 }

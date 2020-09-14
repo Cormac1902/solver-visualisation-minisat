@@ -21,6 +21,7 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 #ifndef Minisat_Solver_h
 #define Minisat_Solver_h
 
+#include <s_vis_zmq.hpp>
 #include "minisat/mtl/Vec.h"
 #include "minisat/mtl/Heap.h"
 #include "minisat/mtl/Alg.h"
@@ -116,6 +117,14 @@ public:
     virtual void garbageCollect();
     void    checkGarbage(double gf);
     void    checkGarbage();
+
+    // ZMQ:
+    //
+    void sendStartInteractor() {if (zmq) s_vis_zmq->send_start_interactor();}
+    int sendStartInteractorAndExit(int status) {
+        sendStartInteractor();
+        return status;
+    }
 
     // Extra results: (read-only member variable)
     //
@@ -281,6 +290,26 @@ protected:
     bool     withinBudget     ()      const;
     void     relocAll         (ClauseAllocator& to);
 
+    // ZMQ:
+    //
+    void addClauseZMQ(CRef cr) {addClauseZMQ(ca[cr]);}
+    void addClauseZMQ(const Clause& c);
+    void removeClauseZMQ(CRef cr) {removeClauseZMQ(ca[cr]);}
+    void removeClauseZMQ(const Clause& c);
+    void assignVariableZMQ(Var v, bool fromModel = false);
+    void assignVariableZMQ(Lit l, bool fromModel = false) {assignVariableZMQ(var(l), fromModel);}
+    void variableActivityZMQ(Var v);
+    void variableActivityZMQ(Lit l) {variableActivityZMQ(var(l));}
+
+    static std::vector<long> vectorFromClause(const Clause& c);
+    static long longFromLit(Lit l) {return longFromVar(var(l));}
+    static long longFromVar(Var v) {return v + 1;}
+
+    // ZMQ:
+    //
+    bool zmq;
+    s_vis_zmq::SVisZMQ* s_vis_zmq;
+
     // Static helpers:
     //
 
@@ -317,7 +346,9 @@ inline void Solver::varBumpActivity(Var v, double inc) {
 
     // Update order_heap with respect to new activity:
     if (order_heap.inHeap(v))
-        order_heap.decrease(v); }
+        order_heap.decrease(v);
+
+    variableActivityZMQ(v);}
 
 inline void Solver::claDecayActivity() { cla_inc *= (1 / clause_decay); }
 inline void Solver::claBumpActivity (Clause& c) {

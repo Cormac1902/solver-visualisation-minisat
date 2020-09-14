@@ -33,18 +33,19 @@ using namespace Minisat;
 
 static const char* _cat = "CORE";
 
-static DoubleOption  opt_var_decay         (_cat, "var-decay",   "The variable activity decay factor",            0.95,     DoubleRange(0, false, 1, false));
-static DoubleOption  opt_clause_decay      (_cat, "cla-decay",   "The clause activity decay factor",              0.999,    DoubleRange(0, false, 1, false));
-static DoubleOption  opt_random_var_freq   (_cat, "rnd-freq",    "The frequency with which the decision heuristic tries to choose a random variable", 0, DoubleRange(0, true, 1, true));
-static DoubleOption  opt_random_seed       (_cat, "rnd-seed",    "Used by the random variable selection",         91648253, DoubleRange(0, false, HUGE_VAL, false));
-static IntOption     opt_ccmin_mode        (_cat, "ccmin-mode",  "Controls conflict clause minimization (0=none, 1=basic, 2=deep)", 2, IntRange(0, 2));
+static DoubleOption  opt_var_decay         (_cat, "var-decay",    "The variable activity decay factor",            0.95,     DoubleRange(0, false, 1, false));
+static DoubleOption  opt_clause_decay      (_cat, "cla-decay",    "The clause activity decay factor",              0.999,    DoubleRange(0, false, 1, false));
+static DoubleOption  opt_random_var_freq   (_cat, "rnd-freq",     "The frequency with which the decision heuristic tries to choose a random variable", 0, DoubleRange(0, true, 1, true));
+static DoubleOption  opt_random_seed       (_cat, "rnd-seed",     "Used by the random variable selection",         91648253, DoubleRange(0, false, HUGE_VAL, false));
+static IntOption     opt_ccmin_mode        (_cat, "ccmin-mode",   "Controls conflict clause minimization (0=none, 1=basic, 2=deep)", 2, IntRange(0, 2));
 static IntOption     opt_phase_saving      (_cat, "phase-saving", "Controls the level of phase saving (0=none, 1=limited, 2=full)", 2, IntRange(0, 2));
-static BoolOption    opt_rnd_init_act      (_cat, "rnd-init",    "Randomize the initial activity", false);
-static BoolOption    opt_luby_restart      (_cat, "luby",        "Use the Luby restart sequence", true);
-static IntOption     opt_restart_first     (_cat, "rfirst",      "The base restart interval", 100, IntRange(1, INT32_MAX));
-static DoubleOption  opt_restart_inc       (_cat, "rinc",        "Restart interval increase factor", 2, DoubleRange(1, false, HUGE_VAL, false));
-static DoubleOption  opt_garbage_frac      (_cat, "gc-frac",     "The fraction of wasted memory allowed before a garbage collection is triggered",  0.20, DoubleRange(0, false, HUGE_VAL, false));
-static IntOption     opt_min_learnts_lim   (_cat, "min-learnts", "Minimum learnt clause limit",  0, IntRange(0, INT32_MAX));
+static BoolOption    opt_rnd_init_act      (_cat, "rnd-init",     "Randomize the initial activity", false);
+static BoolOption    opt_luby_restart      (_cat, "luby",         "Use the Luby restart sequence", true);
+static IntOption     opt_restart_first     (_cat, "rfirst",       "The base restart interval", 100, IntRange(1, INT32_MAX));
+static DoubleOption  opt_restart_inc       (_cat, "rinc",         "Restart interval increase factor", 2, DoubleRange(1, false, HUGE_VAL, false));
+static DoubleOption  opt_garbage_frac      (_cat, "gc-frac",      "The fraction of wasted memory allowed before a garbage collection is triggered",  0.20, DoubleRange(0, false, HUGE_VAL, false));
+static IntOption     opt_min_learnts_lim   (_cat, "min-learnts",  "Minimum learnt clause limit",  0, IntRange(0, INT32_MAX));
+static BoolOption    opt_zmq               (_cat, "zmq",          "Send solving information to ZMQ for rendering with s_vis", false);
 
 
 //=================================================================================================
@@ -101,6 +102,8 @@ Solver::Solver() :
   , conflict_budget    (-1)
   , propagation_budget (-1)
   , asynch_interrupt   (false)
+  , zmq                (opt_zmq)
+  , s_vis_zmq          (zmq ? new s_vis_zmq::SVisZMQ() : nullptr)
 {}
 
 
@@ -186,8 +189,10 @@ void Solver::attachClause(CRef cr){
     assert(c.size() > 1);
     watches[~c[0]].push(Watcher(cr, c[1]));
     watches[~c[1]].push(Watcher(cr, c[0]));
-    if (c.learnt()) num_learnts++, learnts_literals += c.size();
-    else            num_clauses++, clauses_literals += c.size();
+    if (c.learnt()) {
+        num_learnts++, learnts_literals += c.size();
+        addClauseZMQ(c);
+    } else {num_clauses++, clauses_literals += c.size();}
 }
 
 
@@ -211,6 +216,9 @@ void Solver::detachClause(CRef cr, bool strict){
 
 void Solver::removeClause(CRef cr) {
     Clause& c = ca[cr];
+
+    if (c.learnt()) removeClauseZMQ(c);
+
     detachClause(cr);
     // Don't leave pointers to free'd memory!
     if (locked(c)) vardata[var(c[0])].reason = CRef_Undef;
@@ -233,6 +241,7 @@ void Solver::cancelUntil(int level) {
         for (int c = trail.size()-1; c >= trail_lim[level]; c--){
             Var      x  = var(trail[c]);
             assigns [x] = l_Undef;
+            assignVariableZMQ(x);
             if (phase_saving > 1 || (phase_saving == 1 && c > trail_lim.last()))
                 polarity[x] = sign(trail[c]);
             insertVarOrder(x); }
@@ -489,6 +498,7 @@ void Solver::uncheckedEnqueue(Lit p, CRef from)
     assigns[var(p)] = lbool(!sign(p));
     vardata[var(p)] = mkVarData(from, decisionLevel());
     trail.push_(p);
+    assignVariableZMQ(p);
 }
 
 
@@ -992,11 +1002,11 @@ void Solver::printStats() const
 {
     double cpu_time = cpuTime();
     double mem_used = memUsedPeak();
-    printf("restarts              : %"PRIu64"\n", starts);
-    printf("conflicts             : %-12"PRIu64"   (%.0f /sec)\n", conflicts   , conflicts   /cpu_time);
-    printf("decisions             : %-12"PRIu64"   (%4.2f %% random) (%.0f /sec)\n", decisions, (float)rnd_decisions*100 / (float)decisions, decisions   /cpu_time);
-    printf("propagations          : %-12"PRIu64"   (%.0f /sec)\n", propagations, propagations/cpu_time);
-    printf("conflict literals     : %-12"PRIu64"   (%4.2f %% deleted)\n", tot_literals, (max_literals - tot_literals)*100 / (double)max_literals);
+    printf("restarts              : %" PRIu64"\n", starts);
+    printf("conflicts             : %-12" PRIu64"   (%.0f /sec)\n", conflicts   , conflicts   /cpu_time);
+    printf("decisions             : %-12" PRIu64"   (%4.2f %% random) (%.0f /sec)\n", decisions, (float)rnd_decisions*100 / (float)decisions, decisions   /cpu_time);
+    printf("propagations          : %-12" PRIu64"   (%.0f /sec)\n", propagations, propagations/cpu_time);
+    printf("conflict literals     : %-12" PRIu64"   (%4.2f %% deleted)\n", tot_literals, (max_literals - tot_literals)*100 / (double)max_literals);
     if (mem_used != 0) printf("Memory used           : %.2f MB\n", mem_used);
     printf("CPU time              : %g s\n", cpu_time);
 }
@@ -1063,4 +1073,42 @@ void Solver::garbageCollect()
         printf("|  Garbage collection:   %12d bytes => %12d bytes             |\n", 
                ca.size()*ClauseAllocator::Unit_Size, to.size()*ClauseAllocator::Unit_Size);
     to.moveTo(ca);
+}
+
+void Solver::addClauseZMQ(const Clause& c) {
+    if (zmq) {
+        s_vis_zmq->add_clause(vectorFromClause(c));
+    }
+}
+
+void Solver::removeClauseZMQ(const Clause& c) {
+    if (zmq) {
+        s_vis_zmq->remove_clause(vectorFromClause(c));
+    }
+}
+
+void Solver::assignVariableZMQ(Var v, bool fromModel) {
+    if (zmq) {
+        long litVar = longFromVar(v);
+        auto assignment = fromModel ? modelValue(v) : value(v);
+        if (assignment == l_False) {
+            litVar = -litVar;
+        }
+        s_vis_zmq->assign_variable(litVar, assignment == l_Undef);
+    }
+}
+
+void Solver::variableActivityZMQ(Var v) {
+    if (zmq) {
+        s_vis_zmq->variable_activity(longFromVar(v));
+    }
+}
+
+std::vector<long> Solver::vectorFromClause(const Clause& c) {
+    std::vector<long> longs;
+    longs.reserve(c.size());
+    for (auto i = 0; i < c.size(); i++) {
+        longs.push_back(longFromLit(c[i]));
+    }
+    return longs;
 }

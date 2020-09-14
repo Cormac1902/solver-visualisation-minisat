@@ -587,6 +587,7 @@ void SimpSolver::extendModel()
 
         x = toLit(elimclauses[i]);
         model[var(x)] = lbool(!sign(x));
+        assignVariableZMQ(x, true);
     next:;
     }
 }
